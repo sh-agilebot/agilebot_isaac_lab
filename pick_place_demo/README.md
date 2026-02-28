@@ -4,7 +4,7 @@
 
 This project is a high-performance simulation demo built on **IsaacLab**, featuring an **Agilebot** robot performing autonomous pick-and-place tasks. It demonstrates a robust state-machine-based control flow, multi-environment synchronization, and advanced features like tilt-aware grasping.
 
-![Pick-and-Place Demo (Placeholder)](../docs/assets/pick_place_demo_placeholder.svg)
+![Pick-and-Place Demo (Placeholder)](../docs/assets/pick_place_demo.png)
 
 ## 🚀 Features
 
