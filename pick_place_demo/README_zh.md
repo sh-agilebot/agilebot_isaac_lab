@@ -4,7 +4,7 @@
 
 本项目是基于 **IsaacLab** 开发的高性能仿真演示程序，展示了 **Agilebot** 机器人执行自动抓取与放置任务的能力。该项目具有健壮的基于状态机的控制流、多环境同步以及先进的倾斜补偿抓取功能。
 
-![Pick-and-Place Demo（占位图）](../docs/assets/pick_place_demo_placeholder.svg)
+![Pick-and-Place Demo (Placeholder)](../docs/assets/pick_place_demo.png)
 
 ## 🚀 功能特性
 
