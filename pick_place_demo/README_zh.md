@@ -60,8 +60,8 @@ python main.py --enable_cameras --enable-tilt-compensation --grasp-strategy alig
 | `--enable_cameras` | `False` | 启用相机传感器（本 Demo 必需）。 |
 | `--enable-tilt-compensation` | `False` | 启用倾斜/翻倒物体抓取补偿。 |
 | `--grasp-strategy` | `vertical` | 倾斜物体抓取策略（`vertical` 垂直对齐或 `aligned` 姿态对齐）。开启 `aligned` 时允许对翻倒物体进行水平侧面抓取。 |
-| `--reset-interval-steps` | `900` | 每回合自动重置的步数。 |
-| `--control-noise` | `0.0` | 关节控制噪声标准差。 |
+| `--reset-interval-steps` | `900` | 超过该物理仿真步数后，自动重置环境。 |
+| `--control-noise` | `0.0` | 机器初始位置的关节噪声，单位弧度。保证机器人初始位姿大致相同但不相等，用于VLA数据采集。 |
 | `--disable-non-gripper-collision-check` | `False` | 关闭非夹爪碰撞检测（默认开启检测）。 |
 | `--non-gripper-collision-force-threshold` | `20.0` | 非夹爪碰撞判定阈值（N）。 |
 | `--device` | IsaacLab 默认 | 仿真设备（由 AppLauncher 提供，如 `cpu` / `cuda:0`）。 |
