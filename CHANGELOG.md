@@ -14,6 +14,11 @@ This project uses commit dates as release dates.
 - High-performance inference deployment scripts.
 - Advanced reinforcement learning demos (multi-task, obstacle avoidance, etc.).
 
+## [0.1.1] - 2026-03-06
+
+### Removed
+- Removed wrist camera gripper assets (`gbt-c5a_wrist_camera_gripper`) due to unresolved copyright concerns.
+
 ## [0.1.0] - 2026-02-27
 
 ### Added
