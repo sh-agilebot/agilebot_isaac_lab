@@ -19,38 +19,6 @@ from controller.phases.base import PhaseHandler, PhaseContext, PhaseResult
 from controller.phases.state_machine import GraspPhase
 
 
-PLACE_APPROACH_HEIGHT = 0.05
-PLACE_RETRACT_HEIGHT = 0.04
-
-
-def _compute_place_hover_flange_position(
-    place_pos: torch.Tensor,
-    place_quat: torch.Tensor,
-    ee_offset: torch.Tensor,
-    hover_height: float = PLACE_APPROACH_HEIGHT,
-) -> torch.Tensor:
-    """Compute the flange pose for a hover point above the place target."""
-    hover_tcp_pos = place_pos.clone()
-    hover_tcp_pos[:, 2] += hover_height
-    return PoseTransformer.compute_grasp_flange_position(
-        hover_tcp_pos, place_quat, ee_offset
-    )
-
-
-def _compute_place_retract_flange_position(
-    place_pos: torch.Tensor,
-    place_quat: torch.Tensor,
-    ee_offset: torch.Tensor,
-    retract_height: float = PLACE_RETRACT_HEIGHT,
-) -> torch.Tensor:
-    """Compute the flange pose for the post-release retract point."""
-    retract_tcp_pos = place_pos.clone()
-    retract_tcp_pos[:, 2] += retract_height
-    return PoseTransformer.compute_grasp_flange_position(
-        retract_tcp_pos, place_quat, ee_offset
-    )
-
-
 class LiftPhase(PhaseHandler):
     """Lift phase: Lift the object.
     
@@ -154,14 +122,13 @@ class MoveToPlacePhase(PhaseHandler):
     Next Phase: PLACE_DESCENT
     """
     
-    def __init__(self, tolerance: float = 0.015, approach_height: float = PLACE_APPROACH_HEIGHT):
+    def __init__(self, tolerance: float = 0.015):
         """Initialize move to place phase.
         
         Args:
             tolerance: Position tolerance for XY plane [m]
         """
         self.tolerance = tolerance
-        self.approach_height = approach_height
     
     def get_phase_id(self) -> int:
         return GraspPhase.MOVE_TO_PLACE.value
@@ -192,13 +159,17 @@ class MoveToPlacePhase(PhaseHandler):
         place_quat_active = ctx.place_orientation[mask]
         place_pos_active = ctx.place_position[mask]
         
-        # Move to a hover point above the place target before descending.
-        flange_pos = _compute_place_hover_flange_position(
-            place_pos_active,
-            place_quat_active,
-            ctx.ee_offset,
-            hover_height=self.approach_height,
+        # Compute flange position for place
+        # flange_pos = TCP_pos - ee_offset_in_world
+        ee_offset_world = PoseTransformer.local_to_world_vector(
+            place_quat_active, ctx.ee_offset
         )
+        
+        # Set X,Y to place position (minus offset)
+        flange_pos = place_pos_active - ee_offset_world
+        
+        # Keep Z at current height (lifted)
+        flange_pos[:, 2] = ctx.ee_pos_b[mask, 2]
         
         target_pos[mask] = flange_pos
         target_quat[mask] = place_quat_active
@@ -207,21 +178,12 @@ class MoveToPlacePhase(PhaseHandler):
         computed_positions = self.compute_ik(ctx, target_pos, target_quat)
         joint_positions[mask] = computed_positions[mask]
         
-        # Require the full hover pose to be reached before descending.
-        reached_pos = self.check_position_reached(
-            ctx.ee_pos_b[mask],
-            target_pos[mask],
-            self.tolerance
+        # Check if XY position reached
+        xy_error = torch.norm(
+            ctx.ee_pos_b[mask, :2] - target_pos[mask, :2],
+            dim=-1
         )
-
-        q1 = ctx.ee_quat_b[mask]
-        q2 = target_quat[mask]
-        dot = torch.abs(torch.sum(q1 * q2, dim=1))
-        dot = torch.clamp(dot, -1.0, 1.0)
-        angle_diff = 2.0 * torch.acos(dot)
-        orientation_stabilized = angle_diff < 0.087
-
-        reached = reached_pos & orientation_stabilized
+        reached = xy_error < self.tolerance
         
         # Build full completion mask
         completion_mask = torch.zeros(batch_size, dtype=torch.bool, device=device)
@@ -502,7 +464,7 @@ class PlaceOpenedPhase(PhaseHandler):
             effective_wait = torch.full_like(timers, ctx.place_stabilization_time)
 
         # Minimal retract behavior:
-        # keep place pose in the first half, then retract TCP upward.
+        # keep place pose in the first half, then retract TCP upward by 4cm.
         hold_steps = torch.clamp(effective_wait * 0.5, min=1.0)
         retract_steps = torch.clamp(effective_wait - hold_steps, min=1.0)
         retract_progress = torch.clamp(
@@ -511,7 +473,7 @@ class PlaceOpenedPhase(PhaseHandler):
             max=1.0,
         )
         retract_tcp_pos = place_pos_active.clone()
-        retract_tcp_pos[:, 2] += PLACE_RETRACT_HEIGHT * retract_progress
+        retract_tcp_pos[:, 2] += 0.04 * retract_progress
 
         # Compute flange position
         flange_pos = PoseTransformer.compute_grasp_flange_position(
@@ -583,14 +545,12 @@ class DonePhase(PhaseHandler):
         target_pos = torch.zeros((batch_size, 3), device=device)
         target_quat = torch.zeros((batch_size, 4), device=device)
         
-        # Maintain the retracted pose after release so the arm does not dip back down.
+        # Maintain position at place target
         place_quat_active = ctx.place_orientation[mask]
         place_pos_active = ctx.place_position[mask]
         
-        flange_pos = _compute_place_retract_flange_position(
-            place_pos_active,
-            place_quat_active,
-            ctx.ee_offset,
+        flange_pos = PoseTransformer.compute_grasp_flange_position(
+            place_pos_active, place_quat_active, ctx.ee_offset
         )
         
         target_pos[mask] = flange_pos

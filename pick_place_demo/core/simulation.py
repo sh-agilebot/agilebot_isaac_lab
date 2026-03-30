@@ -7,7 +7,9 @@ Main simulation module for automatic pick-and-place demo execution.
 """
 
 import sys
+from dataclasses import dataclass, field
 from pathlib import Path
+import re
 
 # Add project root to Python path for local imports when used as a module.
 PROJECT_ROOT = Path(__file__).resolve().parents[1]
@@ -36,22 +38,75 @@ GRASP_XY_OFFSET = torch.tensor([0.0, 0.0])  # Gripper centering calibration
 # Drop detection threshold
 DROP_DISTANCE_THRESHOLD = 0.10  # 10cm - if TCP-cube distance exceeds this, consider dropped
 
-# Strict collision allowance:
-# only these two Robotiq contact-pad links are allowed as non-violating links.
-# all other contact-sensor bodies (robot/container/object, etc.) are monitored for violations.
-ROBOTIQ_ALLOWED_CONTACT_BODY_NAME_PAIRS = (
-    # Preferred naming in some Robotiq USDs
+# Collision stop policy:
+# - any robot link contacting the container triggers a stop
+# - contacts with the grasped object are allowed only on gripper finger bodies
+# table contact is handled separately by scene setup because the robot base is mounted on the workbench.
+COLLISION_CHECK_PHASES = [phase for phase in GraspPhase if phase != GraspPhase.DONE]
+COLLISION_HIGHLIGHT_MATERIAL_PATH = "/World/Looks/non_gripper_collision_highlight_red"
+COLLISION_HIGHLIGHT_OVERLAY_ROOT = "/Visuals/collision_highlights"
+COLLISION_HIGHLIGHT_OVERLAY_RADIUS = 0.035
+COLLISION_BODY_LOG_PREVIEW_LIMIT = 12
+ROBOT_OBJECT_ALLOWED_CONTACT_BODY_NAME_PAIRS = (
     ("left_inner_finger_pad", "right_inner_finger_pad"),
-    # Fallback naming in this project USD
     ("left_inner_finger", "right_inner_finger"),
 )
-# Fallback keyword rules (still strict: exactly one left link and one right link).
-ROBOTIQ_ALLOWED_CONTACT_SIDE_KEYWORD_PAIRS = (
+ROBOT_OBJECT_ALLOWED_CONTACT_SIDE_KEYWORD_PAIRS = (
     (("left", "inner", "finger", "pad"), ("right", "inner", "finger", "pad")),
     (("left", "inner", "finger"), ("right", "inner", "finger")),
 )
-COLLISION_CHECK_PHASES = [phase for phase in GraspPhase if phase != GraspPhase.DONE]
-COLLISION_HIGHLIGHT_MATERIAL_PATH = "/World/Looks/non_gripper_collision_highlight_red"
+
+
+@dataclass(frozen=True)
+class CollisionSourceRuntime:
+    """Runtime metadata needed to evaluate one collision sensor source."""
+
+    name: str
+    sensor: object
+    monitored_body_ids: torch.Tensor
+    body_names: list[str]
+    body_prim_paths: list[str]
+    body_name_to_state_idx: dict[str, int]
+    allowed_body_names: list[str] = field(default_factory=list)
+
+
+@dataclass
+class CollisionVisualizationState:
+    """Mutable bookkeeping for collision highlighting and overlays."""
+
+    highlight_material_path: str | None = None
+    highlighted_body_materials: dict[str, str | None] = field(default_factory=dict)
+    active_overlay_paths: set[str] = field(default_factory=set)
+
+
+@dataclass
+class CollisionCheckRuntime:
+    """Runtime state for non-gripper collision detection."""
+
+    enabled: bool
+    log_interval: int
+    sources: list[CollisionSourceRuntime] = field(default_factory=list)
+    visualization: CollisionVisualizationState = field(default_factory=CollisionVisualizationState)
+
+
+@dataclass(frozen=True)
+class CollisionSourceStepSummary:
+    """Per-source collision summary for one simulation step."""
+
+    source_name: str
+    max_force_value: float
+    max_body_name: str | None
+    collided_env_count: int
+
+
+def _format_body_name_list_for_log(body_names: list[str], limit: int = 10) -> str:
+    """Format a body-name list for compact logging."""
+    if not body_names:
+        return "[]"
+
+    preview = body_names[:limit]
+    suffix = "" if len(body_names) <= limit else f", ... (+{len(body_names) - limit} more)"
+    return "[" + ", ".join(preview) + suffix + "]"
 
 
 def build_phase_mask(
@@ -141,6 +196,18 @@ def check_object_dropped(
     return drop_flags, grasp_offset_recorded, cube_height_at_grasp
 
 
+def resolve_monitored_collision_body_ids(
+    collision_sensor, device: torch.device
+) -> tuple[torch.Tensor, list[str]]:
+    """Resolve all sensor-exposed robot bodies as monitored collision bodies."""
+    body_names = collision_sensor.body_names
+    if len(body_names) == 0:
+        raise RuntimeError("Robot collision sensor exposes zero bodies.")
+
+    monitored_body_ids = torch.arange(len(body_names), device=device, dtype=torch.long)
+    return monitored_body_ids, body_names
+
+
 def _find_unique_body_id_by_keywords(
     body_names_lower: list[str], required_keywords: tuple[str, ...]
 ) -> int | None:
@@ -155,58 +222,77 @@ def _find_unique_body_id_by_keywords(
     return None
 
 
-def _resolve_allowed_robotiq_contact_body_ids(body_names_lower: list[str]) -> list[int]:
-    """Resolve exactly two allowed Robotiq contact-link ids (left + right)."""
-    # Priority 1: explicit left/right link-name pairs.
-    for left_name, right_name in ROBOTIQ_ALLOWED_CONTACT_BODY_NAME_PAIRS:
+def _resolve_allowed_object_contact_body_ids(body_names: list[str]) -> list[int]:
+    """Resolve gripper bodies that are allowed to touch the grasped object."""
+    body_names_lower = [body_name.lower() for body_name in body_names]
+    allowed_body_ids: set[int] = set()
+
+    for left_name, right_name in ROBOT_OBJECT_ALLOWED_CONTACT_BODY_NAME_PAIRS:
         left_id = _find_unique_body_id_by_keywords(body_names_lower, (left_name,))
         right_id = _find_unique_body_id_by_keywords(body_names_lower, (right_name,))
         if left_id is not None and right_id is not None and left_id != right_id:
-            return sorted([left_id, right_id])
+            allowed_body_ids.update((left_id, right_id))
 
-    # Priority 2: strict keyword-pair fallback.
-    for left_keywords, right_keywords in ROBOTIQ_ALLOWED_CONTACT_SIDE_KEYWORD_PAIRS:
+    for left_keywords, right_keywords in ROBOT_OBJECT_ALLOWED_CONTACT_SIDE_KEYWORD_PAIRS:
         left_id = _find_unique_body_id_by_keywords(body_names_lower, left_keywords)
         right_id = _find_unique_body_id_by_keywords(body_names_lower, right_keywords)
         if left_id is not None and right_id is not None and left_id != right_id:
-            return sorted([left_id, right_id])
+            allowed_body_ids.update((left_id, right_id))
 
-    return []
+    return sorted(allowed_body_ids)
 
 
-def resolve_restricted_collision_body_ids(
+def resolve_object_collision_body_ids(
     collision_sensor, device: torch.device
 ) -> tuple[torch.Tensor, list[str], list[str]]:
-    """Resolve body ids that are NOT allowed to collide.
+    """Allow only gripper inner-finger bodies to touch the grasped object."""
+    body_names = collision_sensor.body_names
+    if len(body_names) == 0:
+        raise RuntimeError("Robot-object collision sensor exposes zero bodies.")
 
-    Only two Robotiq contact-pad links are treated as allowed links:
-    left/right inner finger contact links (pad naming preferred when available).
-    All other bodies exposed by `collision_sensor` are monitored as collision violations.
-    """
-    all_body_names = collision_sensor.body_names
-    body_names_lower = [name.lower() for name in all_body_names]
-
-    allowed_body_ids = _resolve_allowed_robotiq_contact_body_ids(body_names_lower)
-    if len(allowed_body_ids) != 2:
+    allowed_body_ids = _resolve_allowed_object_contact_body_ids(body_names)
+    if len(allowed_body_ids) == 0:
         raise RuntimeError(
-            "Failed to resolve exactly two allowed Robotiq contact links for collision allowance. "
-            f"Resolved allowed ids: {allowed_body_ids}, body names: {all_body_names}"
+            "Robot-object collision policy matched zero allowed inner-finger contact bodies. "
+            f"Explicit pairs={ROBOT_OBJECT_ALLOWED_CONTACT_BODY_NAME_PAIRS}, "
+            f"fallback keyword pairs={ROBOT_OBJECT_ALLOWED_CONTACT_SIDE_KEYWORD_PAIRS}, "
+            f"body names={body_names}"
         )
 
     monitored_body_ids = [
-        body_id for body_id in range(len(all_body_names)) if body_id not in allowed_body_ids
+        body_id for body_id in range(len(body_names)) if body_id not in allowed_body_ids
     ]
     if not monitored_body_ids:
         raise RuntimeError(
-            "No monitored bodies remain after applying strict Robotiq contact-pad allowance. "
-            f"Body names: {all_body_names}"
+            "Robot-object collision policy would allow every body to contact the object, which is unsafe. "
+            f"Body names: {body_names}"
         )
 
-    allowed_body_names = [all_body_names[body_id] for body_id in allowed_body_ids]
+    allowed_body_names = [body_names[body_id] for body_id in allowed_body_ids]
     return (
         torch.tensor(monitored_body_ids, device=device, dtype=torch.long),
-        all_body_names,
+        body_names,
         allowed_body_names,
+    )
+
+
+def _format_body_name_preview(body_names: list[str], limit: int = COLLISION_BODY_LOG_PREVIEW_LIMIT) -> str:
+    """Format a short preview for body-name logging."""
+    if not body_names:
+        return "[]"
+    preview = body_names[:limit]
+    suffix = "" if len(body_names) <= limit else f", ... (+{len(body_names) - limit} more)"
+    return f"{preview}{suffix}"
+
+
+def log_collision_source_policy(source: CollisionSourceRuntime) -> None:
+    """Log the effective allow/monitor policy for one collision source."""
+    monitored_body_names = [source.body_names[body_id] for body_id in source.monitored_body_ids.tolist()]
+    logger.info(
+        "Collision source '%s' policy: allowed=%s | monitored=%s",
+        source.name,
+        _format_body_name_preview(source.allowed_body_names),
+        _format_body_name_preview(monitored_body_names),
     )
 
 
@@ -218,7 +304,7 @@ def check_monitored_body_collision(
     force_threshold: float,
     device: torch.device,
 ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor]:
-    """Detect collisions on monitored (disallowed) bodies during active grasp phases.
+    """Detect collisions on monitored bodies during active grasp phases.
 
     Returns:
         Tuple of:
@@ -249,6 +335,124 @@ def get_collision_contact_forces_w(collision_sensor) -> torch.Tensor:
     return collision_sensor.data.net_forces_w
 
 
+def build_collision_source_runtime(
+    source_name: str,
+    source_sensor,
+    robot,
+    device: torch.device,
+    num_envs: int,
+    force_threshold: float,
+) -> CollisionSourceRuntime | None:
+    """Build runtime metadata for one collision sensor source."""
+    if source_sensor is None:
+        logger.warning(
+            "Collision check requested but '%s' is missing in scene config. This source is skipped.",
+            f"collision_sensor_{source_name}",
+        )
+        return None
+
+    if source_name == "robot_container":
+        monitored_body_ids, body_names = resolve_monitored_collision_body_ids(
+            source_sensor,
+            device,
+        )
+        logger.info(
+            "Collision source '%s': full_robot_monitoring=enabled, monitored_bodies=%d, threshold=%.2fN",
+            source_name,
+            monitored_body_ids.numel(),
+            force_threshold,
+        )
+        body_name_to_state_idx = resolve_body_name_to_state_index_map(body_names, robot.data.body_state_w)
+        allowed_body_names: list[str] = []
+    elif source_name == "robot_object":
+        monitored_body_ids, body_names, allowed_body_names = resolve_object_collision_body_ids(
+            source_sensor,
+            device,
+        )
+        logger.info(
+            "Collision source '%s': allowed_object_contact_bodies=%s, monitored_bodies=%d, threshold=%.2fN",
+            source_name,
+            _format_body_name_preview(allowed_body_names),
+            monitored_body_ids.numel(),
+            force_threshold,
+        )
+        body_name_to_state_idx = resolve_body_name_to_state_index_map(body_names, robot.data.body_state_w)
+    else:
+        body_names = source_sensor.body_names
+        if len(body_names) == 0:
+            logger.warning(
+                "Collision source '%s' has zero bodies. This source is skipped.",
+                source_name,
+            )
+            return None
+        monitored_body_ids = torch.arange(len(body_names), dtype=torch.long, device=device)
+        logger.info(
+            "Collision source '%s': monitored_bodies=%d, threshold=%.2fN",
+            source_name,
+            monitored_body_ids.numel(),
+            force_threshold,
+        )
+        body_name_to_state_idx = {}
+        allowed_body_names = []
+
+    return CollisionSourceRuntime(
+        name=source_name,
+        sensor=source_sensor,
+        monitored_body_ids=monitored_body_ids,
+        body_names=body_names,
+        body_prim_paths=resolve_collision_body_prim_paths(source_sensor, num_envs),
+        body_name_to_state_idx=body_name_to_state_idx,
+        allowed_body_names=allowed_body_names,
+    )
+
+
+def initialize_collision_check_runtime(
+    args: argparse.Namespace,
+    robot_container_collision_sensor,
+    robot_table_collision_sensor,
+    robot_object_collision_sensor,
+    robot,
+    device: torch.device,
+    num_envs: int,
+) -> CollisionCheckRuntime:
+    """Initialize non-gripper collision detection runtime state."""
+    runtime = CollisionCheckRuntime(
+        enabled=False,
+        log_interval=max(1, int(args.non_gripper_collision_log_interval)),
+    )
+    if not args.enable_non_gripper_collision_check:
+        return runtime
+
+    configured_sensors = []
+    if robot_object_collision_sensor is not None:
+        configured_sensors.append(("robot_object", robot_object_collision_sensor))
+    else:
+        if robot_container_collision_sensor is not None:
+            configured_sensors.append(("robot_container", robot_container_collision_sensor))
+        if robot_table_collision_sensor is not None:
+            configured_sensors.append(("robot_table", robot_table_collision_sensor))
+    for source_name, source_sensor in configured_sensors:
+        source_runtime = build_collision_source_runtime(
+            source_name=source_name,
+            source_sensor=source_sensor,
+            robot=robot,
+            device=device,
+            num_envs=num_envs,
+            force_threshold=args.non_gripper_collision_force_threshold,
+        )
+        if source_runtime is not None:
+            log_collision_source_policy(source_runtime)
+            runtime.sources.append(source_runtime)
+
+    runtime.enabled = len(runtime.sources) > 0
+    if not runtime.enabled:
+        logger.warning("Collision check requested but no valid collision sensor source is available.")
+        return runtime
+
+    runtime.visualization.highlight_material_path = ensure_collision_highlight_material()
+    return runtime
+
+
 def resolve_collision_body_prim_paths(collision_sensor, num_envs: int) -> list[str]:
     """Resolve contact-sensor body prim paths in flattened env-major order."""
     body_prim_paths = [str(path) for path in collision_sensor.body_physx_view.prim_paths]
@@ -259,6 +463,23 @@ def resolve_collision_body_prim_paths(collision_sensor, num_envs: int) -> list[s
             f"{len(body_prim_paths)} < {expected}."
         )
     return body_prim_paths[:expected]
+
+
+def resolve_body_name_to_state_index_map(body_names: list[str], body_state_w: torch.Tensor) -> dict[str, int]:
+    """Map body names to articulation body-state indices when shapes are compatible."""
+    if body_state_w.ndim < 3:
+        return {}
+
+    num_state_bodies = int(body_state_w.shape[1])
+    if len(body_names) != num_state_bodies:
+        logger.warning(
+            "Body-name count (%d) does not match body-state count (%d); collision overlays will be skipped.",
+            len(body_names),
+            num_state_bodies,
+        )
+        return {}
+
+    return {body_name: body_id for body_id, body_name in enumerate(body_names)}
 
 
 def ensure_collision_highlight_material() -> str:
@@ -276,6 +497,54 @@ def ensure_collision_highlight_material() -> str:
         )
         red_mat_cfg.func(COLLISION_HIGHLIGHT_MATERIAL_PATH, red_mat_cfg)
     return COLLISION_HIGHLIGHT_MATERIAL_PATH
+
+
+def _sanitize_overlay_name(name: str) -> str:
+    """Create a USD-safe suffix for collision overlay prim names."""
+    sanitized = re.sub(r"[^0-9A-Za-z_]+", "_", name)
+    return sanitized.strip("_") or "body"
+
+
+def ensure_collision_overlay_prim(
+    overlay_path: str,
+    highlight_material_path: str,
+    radius: float = COLLISION_HIGHLIGHT_OVERLAY_RADIUS,
+) -> str:
+    """Create (if needed) a red sphere overlay used to visualize collisions."""
+    from pxr import UsdGeom
+    from isaacsim.core.utils.stage import get_current_stage
+    import isaaclab.sim as sim_utils
+
+    stage = get_current_stage()
+    UsdGeom.Xform.Define(stage, COLLISION_HIGHLIGHT_OVERLAY_ROOT)
+    overlay_xform = UsdGeom.Xform.Define(stage, overlay_path)
+    sphere_path = f"{overlay_path}/marker"
+    sphere = UsdGeom.Sphere.Define(stage, sphere_path)
+    sphere.CreateRadiusAttr(radius)
+    sim_utils.bind_visual_material(
+        sphere_path,
+        highlight_material_path,
+        stronger_than_descendants=True,
+    )
+    UsdGeom.Imageable(overlay_xform.GetPrim()).MakeInvisible()
+    return sphere_path
+
+
+def reset_collision_overlays(active_overlay_paths: set[str]) -> None:
+    """Hide active collision overlays and clear runtime bookkeeping."""
+    if not active_overlay_paths:
+        return
+
+    from pxr import UsdGeom
+    from isaacsim.core.utils.stage import get_current_stage
+
+    stage = get_current_stage()
+    for overlay_path in active_overlay_paths:
+        prim = stage.GetPrimAtPath(overlay_path)
+        if prim.IsValid():
+            UsdGeom.Imageable(prim).MakeInvisible()
+
+    active_overlay_paths.clear()
 
 
 def reset_collision_highlight_materials(highlighted_prim_original_materials: dict[str, str | None]) -> None:
@@ -314,6 +583,12 @@ def reset_collision_highlight_materials(highlighted_prim_original_materials: dic
     highlighted_prim_original_materials.clear()
 
 
+def reset_collision_visualization_state(visualization: CollisionVisualizationState) -> None:
+    """Restore runtime collision visuals to a clean state."""
+    reset_collision_highlight_materials(visualization.highlighted_body_materials)
+    reset_collision_overlays(visualization.active_overlay_paths)
+
+
 def _get_direct_visual_material_path(prim) -> str | None:
     """Get the direct visual material binding target path of a prim."""
     from pxr import UsdShade
@@ -323,6 +598,131 @@ def _get_direct_visual_material_path(prim) -> str | None:
     if len(targets) == 0:
         return None
     return str(targets[0])
+
+
+def apply_collision_visualization(
+    source: CollisionSourceRuntime,
+    newly_collided: torch.Tensor,
+    max_body_ids: torch.Tensor,
+    robot_body_state_w: torch.Tensor,
+    visualization: CollisionVisualizationState,
+) -> None:
+    """Update collision body highlighting and overlay markers for newly collided envs."""
+    highlight_material_path = visualization.highlight_material_path
+    if highlight_material_path is None or not newly_collided.any():
+        return
+
+    highlight_collided_bodies(
+        newly_collided=newly_collided,
+        max_body_ids=max_body_ids,
+        collision_body_prim_paths=source.body_prim_paths,
+        num_bodies=source.sensor.num_bodies,
+        highlight_material_path=highlight_material_path,
+        highlighted_prim_original_materials=visualization.highlighted_body_materials,
+    )
+    show_collision_overlays(
+        newly_collided=newly_collided,
+        max_body_ids=max_body_ids,
+        collision_body_prim_paths=source.body_prim_paths,
+        body_names=source.body_names,
+        num_bodies=source.sensor.num_bodies,
+        body_name_to_state_idx=source.body_name_to_state_idx,
+        body_state_w=robot_body_state_w,
+        highlight_material_path=highlight_material_path,
+        active_overlay_paths=visualization.active_overlay_paths,
+    )
+
+
+def log_new_collision_events(
+    source: CollisionSourceRuntime,
+    newly_collided: torch.Tensor,
+    max_body_ids: torch.Tensor,
+    max_force_per_env: torch.Tensor,
+    current_phases: torch.Tensor,
+) -> None:
+    """Log the first few newly collided envs for one collision source."""
+    if not newly_collided.any():
+        return
+
+    collided_envs = torch.where(newly_collided)[0]
+    for env_idx in collided_envs[:3]:
+        body_id = int(max_body_ids[env_idx].item())
+        body_name = source.body_names[body_id]
+        phase_name = GraspPhase(current_phases[env_idx].item()).name
+        logger.warning(
+            "Env %d: Collision violation (%s) in phase %s on body %s, force=%.3fN",
+            env_idx.item(),
+            source.name,
+            phase_name,
+            body_name,
+            max_force_per_env[env_idx].item(),
+        )
+
+
+def run_collision_checks(
+    runtime: CollisionCheckRuntime,
+    current_phases: torch.Tensor,
+    env_collision_flags: torch.Tensor,
+    force_threshold: float,
+    device: torch.device,
+    robot_body_state_w: torch.Tensor,
+) -> tuple[torch.Tensor, float, list[CollisionSourceStepSummary]]:
+    """Evaluate all configured collision sources and return updated flags plus step summaries."""
+    max_force_value = 0.0
+    updated_collision_flags = env_collision_flags
+    step_summaries: list[CollisionSourceStepSummary] = []
+
+    for source in runtime.sources:
+        updated_collision_flags, newly_collided, max_force_per_env, max_body_ids = check_monitored_body_collision(
+            contact_forces_w=get_collision_contact_forces_w(source.sensor),
+            current_phases=current_phases,
+            monitored_body_ids=source.monitored_body_ids,
+            collision_flags=updated_collision_flags,
+            force_threshold=force_threshold,
+            device=device,
+        )
+
+        source_max_force, source_max_force_env = max_force_per_env.max(dim=0)
+        source_max_body_name = None
+        if max_body_ids.numel() > 0:
+            source_max_body_id = int(max_body_ids[source_max_force_env].item())
+            if 0 <= source_max_body_id < len(source.body_names):
+                source_max_body_name = source.body_names[source_max_body_id]
+
+        source_max_force_value = float(source_max_force.item())
+        max_force_value = max(max_force_value, source_max_force_value)
+        in_check_phase = build_phase_mask(current_phases, COLLISION_CHECK_PHASES, device)
+        source_collision_count = int(
+            torch.sum(in_check_phase & (max_force_per_env > force_threshold)).item()
+        )
+        step_summaries.append(
+            CollisionSourceStepSummary(
+                source_name=source.name,
+                max_force_value=source_max_force_value,
+                max_body_name=source_max_body_name,
+                collided_env_count=source_collision_count,
+            )
+        )
+
+        if not newly_collided.any():
+            continue
+
+        apply_collision_visualization(
+            source=source,
+            newly_collided=newly_collided,
+            max_body_ids=max_body_ids,
+            robot_body_state_w=robot_body_state_w,
+            visualization=runtime.visualization,
+        )
+        log_new_collision_events(
+            source=source,
+            newly_collided=newly_collided,
+            max_body_ids=max_body_ids,
+            max_force_per_env=max_force_per_env,
+            current_phases=current_phases,
+        )
+
+    return updated_collision_flags, max_force_value, step_summaries
 
 
 def highlight_collided_bodies(
@@ -388,6 +788,67 @@ def highlight_collided_bodies(
                 body_prim_path,
                 exc,
             )
+
+
+def show_collision_overlays(
+    newly_collided: torch.Tensor,
+    max_body_ids: torch.Tensor,
+    collision_body_prim_paths: list[str],
+    body_names: list[str],
+    num_bodies: int,
+    body_name_to_state_idx: dict[str, int],
+    body_state_w: torch.Tensor,
+    highlight_material_path: str,
+    active_overlay_paths: set[str],
+) -> None:
+    """Show red sphere overlays at collided body positions."""
+    if not newly_collided.any() or not body_name_to_state_idx:
+        return
+
+    from pxr import UsdGeom
+    from isaacsim.core.utils.stage import get_current_stage
+
+    stage = get_current_stage()
+    collided_env_ids = torch.where(newly_collided)[0].tolist()
+    for env_id in collided_env_ids:
+        body_id = int(max_body_ids[env_id].item())
+        if body_id >= len(body_names):
+            continue
+
+        body_name = body_names[body_id]
+        state_idx = body_name_to_state_idx.get(body_name)
+        if state_idx is None or state_idx >= body_state_w.shape[1]:
+            continue
+
+        flat_index = env_id * num_bodies + body_id
+        if flat_index >= len(collision_body_prim_paths):
+            continue
+
+        body_prim_path = collision_body_prim_paths[flat_index]
+        overlay_path = (
+            f"{COLLISION_HIGHLIGHT_OVERLAY_ROOT}/"
+            f"env_{env_id}_{_sanitize_overlay_name(body_name)}"
+        )
+        ensure_collision_overlay_prim(
+            overlay_path=overlay_path,
+            highlight_material_path=highlight_material_path,
+        )
+
+        overlay_prim = stage.GetPrimAtPath(overlay_path)
+        if not overlay_prim.IsValid():
+            continue
+
+        body_position = body_state_w[env_id, state_idx, 0:3].detach().cpu().tolist()
+        UsdGeom.XformCommonAPI(overlay_prim).SetTranslate(tuple(float(v) for v in body_position))
+        UsdGeom.Imageable(overlay_prim).MakeVisible()
+        active_overlay_paths.add(overlay_path)
+
+        logger.debug(
+            "Collision overlay shown for env=%d body=%s prim=%s",
+            env_id,
+            body_name,
+            body_prim_path,
+        )
 
 
 def stabilize_simulation(sim, scene, sim_dt: float, steps: int) -> None:
@@ -468,7 +929,9 @@ def run_simulator(
     tomato_soup_can = scene["tomato_soup_can"]
     small_KLT = scene["small_KLT"]
     cubes = [tomato_soup_can]
-    robot_collision_sensor = scene.sensors.get("collision_sensor_robot")
+    robot_container_collision_sensor = scene.sensors.get("collision_sensor_robot_container")
+    robot_table_collision_sensor = scene.sensors.get("collision_sensor_robot_table")
+    robot_object_collision_sensor = scene.sensors.get("collision_sensor_robot_object")
 
     # Setup robot entity cfg
     robot_entity_cfg = SceneEntityCfg(
@@ -489,69 +952,15 @@ def run_simulator(
     device = sim.device
     num_envs = scene.num_envs
 
-    collision_check_enabled = False
-    collision_log_interval = max(1, int(args.non_gripper_collision_log_interval))
-    collision_sources: list[dict[str, object]] = []
-    collision_highlight_material_path: str | None = None
-    highlighted_collision_body_materials: dict[str, str | None] = {}
-    if args.enable_non_gripper_collision_check:
-        # Enforce violations only on robot bodies.
-        # The robot collision sensor is configured with filtered targets (container/object),
-        # so table contacts are excluded from strict collision checks.
-        configured_sensors = [
-            ("robot", robot_collision_sensor),
-        ]
-        for source_name, source_sensor in configured_sensors:
-            if source_sensor is None:
-                logger.warning(
-                    "Collision check requested but '%s' is missing in scene config. This source is skipped.",
-                    f"collision_sensor_{source_name}",
-                )
-                continue
-
-            if source_name == "robot":
-                monitored_body_ids, body_names, allowed_collision_bodies = resolve_restricted_collision_body_ids(
-                    source_sensor,
-                    device,
-                )
-                logger.info(
-                    "Collision source '%s': allowed_bodies=%s, monitored_bodies=%d, threshold=%.2fN",
-                    source_name,
-                    allowed_collision_bodies,
-                    monitored_body_ids.numel(),
-                    args.non_gripper_collision_force_threshold,
-                )
-            else:
-                body_names = source_sensor.body_names
-                if len(body_names) == 0:
-                    logger.warning(
-                        "Collision source '%s' has zero bodies. This source is skipped.",
-                        source_name,
-                    )
-                    continue
-                monitored_body_ids = torch.arange(len(body_names), dtype=torch.long, device=device)
-                logger.info(
-                    "Collision source '%s': monitored_bodies=%d, threshold=%.2fN",
-                    source_name,
-                    monitored_body_ids.numel(),
-                    args.non_gripper_collision_force_threshold,
-                )
-
-            collision_sources.append(
-                {
-                    "name": source_name,
-                    "sensor": source_sensor,
-                    "monitored_body_ids": monitored_body_ids,
-                    "body_names": body_names,
-                    "body_prim_paths": resolve_collision_body_prim_paths(source_sensor, num_envs),
-                }
-            )
-
-        collision_check_enabled = len(collision_sources) > 0
-        if not collision_check_enabled:
-            logger.warning("Collision check requested but no valid collision sensor source is available.")
-        else:
-            collision_highlight_material_path = ensure_collision_highlight_material()
+    collision_runtime = initialize_collision_check_runtime(
+        args=args,
+        robot_container_collision_sensor=robot_container_collision_sensor,
+        robot_table_collision_sensor=robot_table_collision_sensor,
+        robot_object_collision_sensor=robot_object_collision_sensor,
+        robot=robot,
+        device=device,
+        num_envs=num_envs,
+    )
     
     # Preallocate tensors
     env_success_flags = torch.zeros(num_envs, device=device, dtype=torch.bool)
@@ -589,7 +998,7 @@ def run_simulator(
         initial_joint_pos, small_KLT, args, center_offset, grasp_xy_offset,
         robot_entity_cfg, num_envs
     )
-    reset_collision_highlight_materials(highlighted_collision_body_materials)
+    reset_collision_visualization_state(collision_runtime.visualization)
     cube_initial_pos[0][:] = pos_list[0]
     cube_initial_quat[0][:] = quat_list[0]
     grasp_pos[:] = g_pos
@@ -632,7 +1041,7 @@ def run_simulator(
                 initial_joint_pos, small_KLT, args, center_offset, grasp_xy_offset,
                 robot_entity_cfg, num_envs
             )
-            reset_collision_highlight_materials(highlighted_collision_body_materials)
+            reset_collision_visualization_state(collision_runtime.visualization)
             cube_initial_pos[0][:] = pos_list[0]
             cube_initial_quat[0][:] = quat_list[0]
             grasp_pos[:] = g_pos
@@ -666,57 +1075,35 @@ def run_simulator(
                 grasp_offset_recorded, cube_height_at_grasp, env_dropped_flags, device
             )
 
-            # === Collision detection (robot strict; filtered to container/object targets) ===
-            if collision_check_enabled:
-                max_force_value = 0.0
-                for source in collision_sources:
-                    source_name = source["name"]
-                    source_sensor = source["sensor"]
-                    source_monitored_body_ids = source["monitored_body_ids"]
-                    source_body_names = source["body_names"]
-                    source_body_prim_paths = source["body_prim_paths"]
+            # === Collision detection ===
+            # robot_container: any robot link touching the bin is a stop event
+            # robot_table: any robot link touching the workbench is a stop event
+            # robot_object: only non-gripper robot links touching the can are stop events
+            if collision_runtime.enabled:
+                env_collision_flags, max_force_value, collision_step_summaries = run_collision_checks(
+                    runtime=collision_runtime,
+                    current_phases=current_phases,
+                    env_collision_flags=env_collision_flags,
+                    force_threshold=args.non_gripper_collision_force_threshold,
+                    device=device,
+                    robot_body_state_w=robot.data.body_state_w,
+                )
 
-                    env_collision_flags, newly_collided, max_force_per_env, max_body_ids = check_monitored_body_collision(
-                        contact_forces_w=get_collision_contact_forces_w(source_sensor),
-                        current_phases=current_phases,
-                        monitored_body_ids=source_monitored_body_ids,
-                        collision_flags=env_collision_flags,
-                        force_threshold=args.non_gripper_collision_force_threshold,
-                        device=device,
-                    )
-
-                    max_force_value = max(max_force_value, max_force_per_env.max().item())
-
-                    if newly_collided.any():
-                        if collision_highlight_material_path is not None:
-                            highlight_collided_bodies(
-                                newly_collided=newly_collided,
-                                max_body_ids=max_body_ids,
-                                collision_body_prim_paths=source_body_prim_paths,
-                                num_bodies=source_sensor.num_bodies,
-                                highlight_material_path=collision_highlight_material_path,
-                                highlighted_prim_original_materials=highlighted_collision_body_materials,
-                            )
-
-                        collided_envs = torch.where(newly_collided)[0]
-                        for env_idx in collided_envs[:3]:
-                            body_id = int(max_body_ids[env_idx].item())
-                            body_name = source_body_names[body_id]
-                            phase_name = GraspPhase(current_phases[env_idx].item()).name
-                            logger.warning(
-                                "Env %d: Collision violation (%s) in phase %s on body %s, force=%.3fN",
-                                env_idx.item(),
-                                source_name,
-                                phase_name,
-                                body_name,
-                                max_force_per_env[env_idx].item(),
-                            )
-
-                if step_counter % collision_log_interval == 0:
+                if step_counter % collision_runtime.log_interval == 0:
                     collision_count = torch.sum(env_collision_flags).item()
+                    source_summary_text = " | ".join(
+                        (
+                            f"{summary.source_name}:"
+                            f"force={summary.max_force_value:.3f}N,"
+                            f"body={summary.max_body_name},"
+                            f"violations={summary.collided_env_count}"
+                        )
+                        for summary in collision_step_summaries
+                    )
                     print(
                         "[DEBUG] Collision check: "
                         f"COLLIDED={collision_count}/{num_envs}, MAX_FORCE={max_force_value:.3f}N"
+                        + (f" | {source_summary_text}" if source_summary_text else "")
                     )
 
             # Freeze motion in collided envs: keep current joint positions and stop further motion commands.

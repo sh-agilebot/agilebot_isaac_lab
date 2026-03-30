@@ -33,6 +33,8 @@
 - 已安装 NVIDIA Isaac Sim 和 IsaacLab。
 - Isaac Lab 官方安装参考：`https://isaac-sim.github.io/IsaacLab/main/index.html`
 - 已配置好 Conda 环境（例如 `isaaclab`）。
+- 已准备好 `assets/usd/gbt-c5a_wrist_camera_gripper/gbt-c5a_wrist_camera_gripper.usd`。
+- 若缺少该 USD，请参考 `https://github.com/sh-agilebot/agilebot_isaac_usd_assets/tree/main/gbt-c5a_wrist_camera_gripper` 获取完整资产，并按该仓库说明生成 USD 文件后放到 `assets/usd/gbt-c5a_wrist_camera_gripper/`。
 
 ### 运行程序
 
@@ -74,7 +76,7 @@ python main.py --help
 
 ## 🧩 常见问题（Troubleshooting）
 
-- **启动时报 USD 路径/资产缺失**：确认已获取 Agilebot USD 资产，并在仓库根目录 `assets/agilebot.py` 配置正确路径。
+- **启动时报 USD 路径/资产缺失**：本项目要求存在 `assets/usd/gbt-c5a_wrist_camera_gripper/gbt-c5a_wrist_camera_gripper.usd`。如果目录里只有 README 等说明文件，说明还没有拿到可直接运行的完整资产或还未完成 USD 生成。请参考 `https://github.com/sh-agilebot/agilebot_isaac_usd_assets/tree/main/gbt-c5a_wrist_camera_gripper`，按其说明生成 USD 后再重试。
 - **相机相关报错 / 无相机数据**：本 Demo 依赖相机传感器，请确保启动时包含 `--enable_cameras`（Isaac Lab AppLauncher 参数）。
 - **无 GUI 运行**：可尝试 `python main.py --headless`（透传给 Isaac Lab AppLauncher）。
 - **性能/显存不足**：逐步增大 `--num_envs`，并观察 GPU/显存占用。

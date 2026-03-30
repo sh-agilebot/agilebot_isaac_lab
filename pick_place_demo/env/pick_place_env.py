@@ -64,15 +64,13 @@ class TableTopSceneCfg(InteractiveSceneCfg):
 
     # sensors
     # NOTE:
-    # ContactSensor cannot reliably monitor multiple top-level prim groups in one config.
-    # Use separate sensors for robot/container/object and merge results in runtime logic.
-    collision_sensor_robot = ContactSensorCfg(
+    # PhysX filtered contact tensors require source/target body counts to align.
+    # The robot has many rigid bodies while the can/KLT/table have only a few,
+    # so per-target filter expressions on a robot-wide sensor become invalid once
+    # multiple environments are cloned. We keep a single unfiltered robot sensor
+    # and apply the "allowed grasp contact" policy in runtime.
+    collision_sensor_robot_object = ContactSensorCfg(
         prim_path="{ENV_REGEX_NS}/Robot/.*",
-        # Only monitor robot contacts against container/object targets (exclude table).
-        filter_prim_paths_expr=[
-            "{ENV_REGEX_NS}/small_KLT",
-            "{ENV_REGEX_NS}/tomato_soup_can",
-        ],
         update_period=0.0,
         history_length=2,
         debug_vis=False,
@@ -106,15 +104,14 @@ class TableTopSceneCfg(InteractiveSceneCfg):
     )
 
     wrist_camera = CameraCfg(
-        # prim_path="{ENV_REGEX_NS}/Robot/gbt_c5a_camera_gripper/link6/flange/camera_mount/Orbbec/camera_rgb/camera_rgb",
-        prim_path="{ENV_REGEX_NS}/Robot/wrist_camera_link/camera_color_frame/wrist_camera",
+        # Verified camera prim path in the generated robot USD:
+        # /GBT_C5A_wrist_camera_gripper/camera_link/Orbbec_Gemini2/camera_rgb/camera_rgb/Stream_rgb
+        prim_path="{ENV_REGEX_NS}/Robot/camera_link/Orbbec_Gemini2/camera_rgb/camera_rgb/Stream_rgb",
         update_period=0.0,
         height=224,
         width=224,
-        # data_types=["rgb", "distance_to_image_plane"],
-        data_types=["rgb",],
-        spawn=None
-       
+        data_types=["rgb"],
+        spawn=None,
     )
 
     # Rigid body properties of each cube

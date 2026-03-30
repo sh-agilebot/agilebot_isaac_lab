@@ -1,4 +1,4 @@
-"""Agilebot robot config used by the pick-and-place demo."""
+"""Agilebot config used by record.py publishing package."""
 
 from pathlib import Path
 
@@ -7,32 +7,21 @@ from isaaclab.actuators import ImplicitActuatorCfg
 from isaaclab.assets.articulation import ArticulationCfg
 
 PROJECT_ROOT = Path(__file__).resolve().parents[2]
-WRIST_CAMERA_GRIPPER_ASSET_ROOT = (
-    PROJECT_ROOT / "assets" / "usd" / "gbt-c5a_wrist_camera_gripper"
-)
-WRIST_CAMERA_GRIPPER_USD_CANDIDATES = (
-    WRIST_CAMERA_GRIPPER_ASSET_ROOT / "gbt-c5a_wrist_camera_gripper.usd",
-    WRIST_CAMERA_GRIPPER_ASSET_ROOT
-    / "urdf"
-    / "gbt-c5a_wrist_camera_gripper"
-    / "gbt-c5a_wrist_camera_gripper.usd",
-)
-WRIST_CAMERA_GRIPPER_USD_FILE = next(
-    (path.resolve() for path in WRIST_CAMERA_GRIPPER_USD_CANDIDATES if path.is_file()),
-    None,
+WRIST_CAMERA_GRIPPER_USD_PATH = str(
+    (
+        PROJECT_ROOT
+        / "assets"
+        / "usd"
+        / "gbt-c5a_wrist_camera_gripper"
+        / "gbt-c5a_wrist_camera_gripper.usd"
+    ).resolve()
 )
 
-if WRIST_CAMERA_GRIPPER_USD_FILE is None:
+if not Path(WRIST_CAMERA_GRIPPER_USD_PATH).is_file():
     raise FileNotFoundError(
-        "USD not found in any expected location. Checked: "
-        f"{', '.join(str(path) for path in WRIST_CAMERA_GRIPPER_USD_CANDIDATES)}. "
-        "Please place the complete generated asset directory under assets/usd/gbt-c5a_wrist_camera_gripper/. "
-        "If you only downloaded the repository skeleton or README files, fetch the full source from "
-        "https://github.com/sh-agilebot/agilebot_isaac_usd_assets/tree/main/gbt-c5a_wrist_camera_gripper "
-        "and follow its README to generate gbt-c5a_wrist_camera_gripper.usd."
+        f"USD not found: {WRIST_CAMERA_GRIPPER_USD_PATH}. "
+        "Please ensure assets/usd/gbt-c5a_wrist_camera_gripper is present."
     )
-
-WRIST_CAMERA_GRIPPER_USD_PATH = str(WRIST_CAMERA_GRIPPER_USD_FILE)
 
 
 GBT_C5A_WRIST_CAMERA_GRIPPER_CFG = ArticulationCfg(
@@ -89,22 +78,6 @@ GBT_C5A_WRIST_CAMERA_GRIPPER_CFG.actuators["gripper_drive"] = ImplicitActuatorCf
     velocity_limit_sim=1.0,
     stiffness=25.0,
     damping=0.5,
-    friction=0.0,
-    armature=0.0,
-)
-GBT_C5A_WRIST_CAMERA_GRIPPER_CFG.actuators["gripper_passive_followers"] = ImplicitActuatorCfg(
-    joint_names_expr=[
-        "left_inner_finger_joint",
-        "right_inner_finger_joint",
-        "left_inner_knuckle_joint",
-        "right_inner_knuckle_joint",
-        "right_outer_knuckle_joint",
-    ],
-    # These gripper joints are mechanically coupled in the imported asset.
-    # Register them as passive followers so Isaac Lab no longer warns that
-    # articulation joints are missing actuator configs.
-    stiffness=0.0,
-    damping=0.0,
     friction=0.0,
     armature=0.0,
 )
