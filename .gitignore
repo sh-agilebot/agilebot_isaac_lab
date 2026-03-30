@@ -50,3 +50,4 @@ datasets/*.h5
 # Isaac/Omniverse local outputs (if generated)
 logs/
 _output/
+pick_place_recoding/
