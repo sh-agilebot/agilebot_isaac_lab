@@ -14,6 +14,12 @@ This project uses commit dates as release dates.
 - High-performance inference deployment scripts.
 - Advanced reinforcement learning demos (multi-task, obstacle avoidance, etc.).
 
+## [0.1.2] - 2026-03-30
+
+### Changed
+- Updated gripper asset strategy: removed bundled third-party wrist-camera gripper assets from the repository and switched to user-provided local USD asset configuration.
+- Added stricter startup checks and guidance for missing gripper USD files to make user-side asset setup explicit.
+
 ## [0.1.1] - 2026-03-06
 
 ### Removed
