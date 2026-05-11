@@ -4,7 +4,7 @@
 
 This project is a high-performance simulation demo built on **IsaacLab**, featuring an **Agilebot** robot performing autonomous pick-and-place tasks. It demonstrates a robust state-machine-based control flow, multi-environment synchronization, and advanced features like tilt-aware grasping.
 
-![Pick-and-Place Demo (Placeholder)](../docs/assets/pick_place_demo.png)
+![Pick-and-Place Demo (Placeholder)](../docs/assets/pick_place_demo_placeholder.svg)
 
 ## 🚀 Features
 
@@ -60,8 +60,8 @@ python main.py --enable_cameras --enable-tilt-compensation --grasp-strategy alig
 | `--enable_cameras` | `False` | Enable camera sensors (required for this demo). |
 | `--enable-tilt-compensation` | `False` | Enable tilted/overturned object grasp compensation. |
 | `--grasp-strategy` | `vertical` | Grasp strategy for tilted objects (`vertical` or `aligned`). Use `aligned` to enable side-grasping for overturned objects. |
-| `--reset-interval-steps` | `900` | Automatically reset the environment after this number of simulation steps. |
-| `--control-noise` | `0.0` | Joint noise (radians) applied at robot initialization. Keeps initial poses similar but not identical for VLA data collection. |
+| `--reset-interval-steps` | `900` | Auto-reset interval (in simulation steps). |
+| `--control-noise` | `0.0` | Std of arm command noise. |
 | `--disable-non-gripper-collision-check` | `False` | Disable non-gripper collision checks (enabled by default). |
 | `--non-gripper-collision-force-threshold` | `20.0` | Collision classification threshold (N). |
 | `--device` | IsaacLab default | Simulation device from AppLauncher (for example `cpu` / `cuda:0`). |

@@ -4,7 +4,6 @@
 
 本项目是基于 **IsaacLab** 开发的高性能仿真演示程序，展示了 **Agilebot** 机器人执行自动抓取与放置任务的能力。该项目具有健壮的基于状态机的控制流、多环境同步以及先进的倾斜补偿抓取功能。
 
-![Pick-and-Place Demo (Placeholder)](../docs/assets/pick_place_demo.png)
 
 ## 🚀 功能特性
 
@@ -33,8 +32,18 @@
 - 已安装 NVIDIA Isaac Sim 和 IsaacLab。
 - Isaac Lab 官方安装参考：`https://isaac-sim.github.io/IsaacLab/main/index.html`
 - 已配置好 Conda 环境（例如 `isaaclab`）。
-- 已准备好 `assets/usd/gbt-c5a_wrist_camera_gripper/gbt-c5a_wrist_camera_gripper.usd`。
-- 若缺少该 USD，请参考 `https://github.com/sh-agilebot/agilebot_isaac_usd_assets/tree/main/gbt-c5a_wrist_camera_gripper` 获取完整资产，并按该仓库说明生成 USD 文件后放到 `assets/usd/gbt-c5a_wrist_camera_gripper/`。
+
+
+### 🤖 机器人资产准备 (URDF 转 USD)
+
+本项目使用的 **Agilebot C5A** 机器人 USD 资产建议通过官方提供的脚本化流程生成，以确保物理参数和相机挂载正确：
+
+1. **获取转换工具**：克隆 [agilebot_isaac_usd_assets](https://github.com/sh-agilebot/agilebot_isaac_usd_assets) 仓库。
+2. **执行转换**：在 `gbt-c5a_wrist_camera_gripper` 目录下，准备好夹爪网格后，运行 `convert_urdf_to_usd.py` 脚本生成 USD。
+3. **部署资产**：将生成的 `gbt-c5a_wrist_camera_gripper` USD 文件夹放置在本项目根目录的 `assets/usd/` 下。
+
+> [!TIP]
+> 转换后的目录应包含主 `.usd` 文件以及 `configuration/` 子文件夹（包含物理层和传感器配置）。
 
 ### 运行程序
 
@@ -62,8 +71,8 @@ python main.py --enable_cameras --enable-tilt-compensation --grasp-strategy alig
 | `--enable_cameras` | `False` | 启用相机传感器（本 Demo 必需）。 |
 | `--enable-tilt-compensation` | `False` | 启用倾斜/翻倒物体抓取补偿。 |
 | `--grasp-strategy` | `vertical` | 倾斜物体抓取策略（`vertical` 垂直对齐或 `aligned` 姿态对齐）。开启 `aligned` 时允许对翻倒物体进行水平侧面抓取。 |
-| `--reset-interval-steps` | `900` | 超过该物理仿真步数后，自动重置环境。 |
-| `--control-noise` | `0.0` | 机器初始位置的关节噪声，单位弧度。保证机器人初始位姿大致相同但不相等，用于VLA数据采集。 |
+| `--reset-interval-steps` | `900` | 每回合自动重置的步数。 |
+| `--control-noise` | `0.0` | 关节控制噪声标准差。 |
 | `--disable-non-gripper-collision-check` | `False` | 关闭非夹爪碰撞检测（默认开启检测）。 |
 | `--non-gripper-collision-force-threshold` | `20.0` | 非夹爪碰撞判定阈值（N）。 |
 | `--device` | IsaacLab 默认 | 仿真设备（由 AppLauncher 提供，如 `cpu` / `cuda:0`）。 |
@@ -76,7 +85,7 @@ python main.py --help
 
 ## 🧩 常见问题（Troubleshooting）
 
-- **启动时报 USD 路径/资产缺失**：本项目要求存在 `assets/usd/gbt-c5a_wrist_camera_gripper/gbt-c5a_wrist_camera_gripper.usd`。如果目录里只有 README 等说明文件，说明还没有拿到可直接运行的完整资产或还未完成 USD 生成。请参考 `https://github.com/sh-agilebot/agilebot_isaac_usd_assets/tree/main/gbt-c5a_wrist_camera_gripper`，按其说明生成 USD 后再重试。
+- **启动时报 USD 路径/资产缺失**：确认已获取 Agilebot USD 资产，并在仓库根目录 `assets/agilebot.py` 配置正确路径。
 - **相机相关报错 / 无相机数据**：本 Demo 依赖相机传感器，请确保启动时包含 `--enable_cameras`（Isaac Lab AppLauncher 参数）。
 - **无 GUI 运行**：可尝试 `python main.py --headless`（透传给 Isaac Lab AppLauncher）。
 - **性能/显存不足**：逐步增大 `--num_envs`，并观察 GPU/显存占用。
